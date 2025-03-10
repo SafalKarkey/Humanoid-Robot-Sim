@@ -9,30 +9,40 @@ chosenRotateMotion = nil  -- "rotate" (left) or "rotate_right" (right)
 lastNeckPos = 0           -- To store the neck angle when object is first detected.
 moveType = nil            -- "side", "forward", or "pick" (for moving phase)
 sensorDetectedPoint = nil -- Latest sensor-detected point
+-- headMovingRight = true
+incrementer = math.rad(10)
 
 -----------------------------------------------------
 
 function scan_environment()
-    sim.wait(0.3, false)
+    sim.wait(0.05, false)
     local current_angle = sim.getJointTargetPosition(neck)
+    print(math.deg(current_angle))
 
-    if current_angle <= -45 then
+    if current_angle <= math.rad(-90) then
+        print("Moving right now......")
         headMovingRight = true -- Change direction
         scanPassCount = scanPassCount + 1
-    elseif current_angle >= 45 then
+    elseif current_angle >= math.rad(90) then
         headMovingRight = false -- Change direction
         scanPassCount = scanPassCount + 1
     end
 
     if headMovingRight then
-        sim.setJointTargetPosition(neck, current_angle + 10)
+        local new_angle = current_angle + incrementer
+        sim.setJointTargetPosition(neck, new_angle)
     else
-        sim.setJointTargetPosition(neck, current_angle - 10)
+        local new_angle = current_angle - incrementer
+        sim.setJointTargetPosition(neck, new_angle)
     end
 
     -- If two full passes are complete and no object detected, rotate the body
     if scanPassCount >= 2 then
         print("No object found after full scan. Rotating body.")
+        sim.wait(1.0, false) -- Give some time for the head to reset
+        -- Reset head and wait until it reaches position 0
+        sim.setJointTargetPosition(neck, 0)
+        sim.wait(1.0, false) -- Give some time for the head to reset
         scanPassCount = 0 -- Reset scan counter
         robotState = "bodyRotating"
     end
@@ -96,8 +106,8 @@ function sysCall_init()
     -- visionHandle    = sim.getObjectHandle('../Vision_sensor')
     aligned_threshold = 5  
     cube_dummy      = sim.getObjectHandle('../cube_dummy')
-    head_dummy      = sim.getObjectHandle('../head_dummy')
     gyro = sim.getObjectHandle('../gyro_dummy')
+    box = sim.getObjectHandle('../box')
 
     distance_to_obj = math.huge
     getJoints()
@@ -110,7 +120,8 @@ function sysCall_init()
         pick         = { index = 1, nextIndex = 2, angles = pick_angles, frames = pick_frames, endFrame = pick_end_frame, firstExecutionComplete = false },
         rotate       = { index = 1, nextIndex = 2, angles = lturn_angles, frames = lturn_frames, endFrame = lturn_end_frame, firstExecutionComplete = false },
         rotate_right = { index = 1, nextIndex = 2, angles = rturn_angles, frames = rturn_frames, endFrame = rturn_end_frame, firstExecutionComplete = false },
-        getup = { index = 1, nextIndex = 2, angles = getup_angles, frames = getup_frames, endFrame = getup_end_frame, firstExecutionComplete = false }
+        getup = { index = 1, nextIndex = 2, angles = getup_angles, frames = getup_frames, endFrame = getup_end_frame, firstExecutionComplete = false },
+        getup_down = { index = 1, nextIndex = 2, angles = getup_down_angles, frames = getup_down_frames, endFrame = getup_down_end_frame, firstExecutionComplete = false }
     }
 
     frameStartTime = sim.getSimulationTime()
@@ -118,23 +129,23 @@ function sysCall_init()
     pick_flag = 0
     turn_counter = 0
 
-    robotState = "scanning" -- Start scanning.
+    robotState = "idle" -- Start scanning.
     moveType = nil
     sensorDetectedPoint = nil
     scanPassCount = 0 -- Track full head rotation passes
 
     default = 0
     fall = 0
-    fall_threshold = math.rad(-45)
+    -- fall_threshold = math.rad(-45)
+    dist_thres = 0.1
 
 end
 
 function detect_fall()
-    gyro_angle = sim.getObjectOrientation(gyro)
-    -- print("Gyro: ", gyro_angle[1])
-    if(gyro_angle[1] < fall_threshold) then
-        print("Robot has fallen")
-    return 1
+    result, distData, objectHandlePair = sim.checkDistance(gyro, box)
+    if(distData[7] < dist_thres) then
+        print("Robot fell!!!!!!!!!!")
+        return 1
     else
         return 0
     end
@@ -144,12 +155,22 @@ end
 -----------------------------------------------------
 -- Sensor reading. In "scanning", "aligned", or "moving" states we update sensor data.
 function sysCall_sensing()
+    neck_pos = sim.getJointTargetPosition(neck)
     isFall = detect_fall()
+    gyro_angle_table = sim.getObjectOrientation(gyro)
+    gyro_angle = math.deg(gyro_angle_table[1])
+    print("Gyro: ", gyro_angle)
+
+    
     if robotState == "scanning" or robotState == "aligned" or robotState == "moving" then
         -- Read proximity sensor
         local result, distance, detectedPoint, detectedObjectHandle, detectedSurfaceNormal = sim.readProximitySensor(sensorHandle)
         if result > 0 then
-            detected = 1
+            if neck_pos ~= 0 then
+                detected = 1 -- rotate signal
+            else
+                detected = 2
+            end
             distance_to_obj = distance
             sensorDetectedPoint = detectedPoint
         else
@@ -167,17 +188,18 @@ function sysCall_actuation()
     -- print("Fallen?....", isFall)
     if(isFall == 1) then
         robotState = "recovering"
+    elseif robotState == "idle" then
+        robotState = "scanning"
     end
     
-    local neck_pos = sim.getJointTargetPosition(neck)
     print("State:", robotState, "| Neck pos:", neck_pos, "| Detected points: ", sensorDetectedPoint, "| Dist: ",
         distance_to_obj)
 
     if robotState == "scanning" then
-        if detected == 1 then
+        if detected >= 1 then
             -- Store the head angle upon detection.
             lastNeckPos = neck_pos
-            print("Object detected. Switching to objectDetected state.")
+            print("Object detected at ",neck_pos,". Switching to objectDetected state.")
             robotState = "objectDetected"
         else
             scan_environment()
@@ -185,14 +207,26 @@ function sysCall_actuation()
     elseif robotState == "objectDetected" then
         -- Force head to 0.
         sim.setJointTargetPosition(neck, 0)
-        if math.abs(neck_pos) < 0.1 then
-            print("Head reset to 0. Switching to rotating state.")
+        print("last neck pos: ", lastNeckPos)
+        if lastNeckPos == 0 then
+            detected = 2
+        end
+        if lastNeckPos == 0 then
             -- Decide rotation direction using stored lastNeckPos.
-            if lastNeckPos > 0 then
+            if (robotState ~= "rotating") then
+               robotState = "aligned"
+               return
+            end
+        elseif lastNeckPos > 0 then
                 chosenRotateMotion = "rotate"       -- left rotation.
             else
                 chosenRotateMotion = "rotate_right" -- right rotation.
             end
+            print("Head reset to 0. Switching to rotating state.")
+            --if detected == 1, rotating
+            num_rotations = math.ceil(math.abs(math.deg(lastNeckPos)) / 13)  -- Calculate steps needed
+            turn_counter = 0  -- Track completed rotations
+
             robotState = "rotating"
             -- Reset rotation motion state.
             if chosenRotateMotion == "rotate" then
@@ -205,27 +239,45 @@ function sysCall_actuation()
                 motionStates.rotate_right.firstExecutionComplete = false
             end
             frameStartTime = sim.getSimulationTime()
-        end
+        -- end
     elseif robotState == "rotating" then
         if chosenRotateMotion == "rotate" then
             executeMotion(motionStates.rotate)
             if motionStates.rotate.firstExecutionComplete then
-                print("Rotation complete. Switching to aligned state.")
-                robotState = "aligned"
-                sim.setJointTargetPosition(neck, 0)
+                turn_counter = turn_counter + 1
+                if turn_counter >= num_rotations then
+                    print("Rotation complete. Switching to aligned state.")
+                    detected = 2
+                    robotState = "aligned"
+                    sim.setJointTargetPosition(neck, 0)
+                else
+                    -- Reset for next rotation step
+                    motionStates.rotate.index = 1
+                    motionStates.rotate.nextIndex = 2
+                    motionStates.rotate.firstExecutionComplete = false
+                end
             end
         elseif chosenRotateMotion == "rotate_right" then
             executeMotion(motionStates.rotate_right)
             if motionStates.rotate_right.firstExecutionComplete then
-                print("Rotation complete. Switching to aligned state.")
-                robotState = "aligned"
-                sim.setJointTargetPosition(neck, 0)
+                turn_counter = turn_counter + 1
+                if turn_counter >= num_rotations then
+                    print("Rotation complete. Switching to aligned state.")
+                    detected = 2
+                    robotState = "aligned"
+                    sim.setJointTargetPosition(neck, 0)
+                else
+                    -- Reset for next rotation step
+                    motionStates.rotate_right.index = 1
+                    motionStates.rotate_right.nextIndex = 2
+                    motionStates.rotate_right.firstExecutionComplete = false
+                end
             end
-        end
+        end    
     elseif robotState == "aligned" then
         -- In the aligned state the head is fixed at 0.
         sim.setJointTargetPosition(neck, 0)
-        if detected == 1 and sensorDetectedPoint then
+        if detected == 2 and sensorDetectedPoint then
             -- Assume sensorDetectedPoint is in sensor coordinates.
             -- We'll use the second coordinate as lateral offset.
             local lateralOffset = math.abs(sensorDetectedPoint[1])
@@ -285,41 +337,54 @@ function sysCall_actuation()
         -- end
     elseif robotState == "bodyRotating" then
         executeMotion(motionStates.rotate) -- Execute full body rotation motion
+        
 
         if motionStates.rotate.firstExecutionComplete then
+            -- sim.wait(1.0, false)
             print("Body rotation complete. Resetting head to 0.")
             motionStates.rotate.firstExecutionComplete = false -- Reset rotation motion
 
             -- Reset head and wait until it reaches position 0
-            sim.setJointTargetPosition(neck, 0)
-            sim.wait(0.5, false) -- Give some time for the head to reset
+            sim.setJointPosition(neck, 0)
+            sim.wait(0.05, false) -- Give some time for the head to reset
 
             -- Ensure it is actually at 0 before scanning
             local head_pos = sim.getJointPosition(neck)
+            print("After rotate..head pos: ", head_pos)
             if math.abs(head_pos) < 0.1 then
                 print("Head successfully reset. Restarting scan.")
-                scanPassCount = 0 -- Reset scan count
                 robotState = "scanning"
+                scanPassCount = 0 -- Reset scan count
             else
                 print("Head did not reset properly. Forcing reset again.")
                 sim.setJointTargetPosition(neck, 0)
+                robotState = "scanning"
+                -- sim.setJointTargetPosition(neck, 0)
             end
         end
     elseif robotState == "recovering" then
-        executeMotion(motionStates.getup)
+        
+        if(gyro_angle > 45) then
+            executeMotion(motionStates.getup_down)
 
-        -- if motionStates.getup.firstExecutionComplete then
-        --     motionStates.getup.firstExecutionComplete = false
-        --     print("Recovery complete...")
-        --     robotState = "scanning"
-        -- end
-        -- print("First exec complete?...", motionStates.getup.firstExecutionComplete)
+            if motionStates.getup_down.firstExecutionComplete  then
+                motionStates.getup_down.firstExecutionComplete = false
+                print("Recovery complete...")
+                robotState = "scanning"
+            end
+        else
+            executeMotion(motionStates.getup)
 
-        if motionStates.getup.firstExecutionComplete  then
-            motionStates.getup.firstExecutionComplete = false
-            print("Recovery complete...")
-            robotState = "scanning"
+            if motionStates.getup.firstExecutionComplete  then
+                motionStates.getup.firstExecutionComplete = false
+                print("Recovery complete...")
+                robotState = "scanning"
+            end
         end
+    elseif robotState == "idle" then
+        -- executeMotion(motionStates.getup)
+
+        print('Robot State now Idle')
     end
 end
 
